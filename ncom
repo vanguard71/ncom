@@ -1,0 +1,707 @@
+#!/usr/bin/perl 
+# ncom - Nagios commandline
+
+# Version: $Revision: 0.5 $
+# Author: Shadhin Rahman <sr2690@columbia.edu>
+# Date: $Date: 2009/05/21 01:10:24 $
+#
+#Copyright (c) 2009 The Trustees of Columbia University in the City of
+#New York.
+# License restrictions apply, see doc/license.html for details.
+use warnings;
+use strict;
+use Data::Dumper;
+use Nagios::Config;
+use Nagios::StatusLog;
+use DBI;
+
+
+my $dbhostname='';
+my $database='';
+my $login_username='';
+my $password='';
+
+my ($action, $hostname, $host, $service, $username, $comment, $HELP);
+my $command_dir="/usr/lib64/nagios/plugins/";
+my %HANDLER_FOR = (
+   'ack' => \&process_acknowledge,
+    'reschedule' => \&process_reschedule,
+    'unack'=> \&process_unacknowledge,
+    'inh' => \&process_inhibit,
+    'uninh' => \&process_uninhibit,
+    'addcomment' => \&process_addcomment,
+    'delcomment' => \&process_addcomment,
+    'status' => \&process_status,
+    'check' => \&process_check,
+    'checkhistory' => \&process_checkhistory,
+    'commandhistory' => \&process_commandhistory,
+    'alerthistory' => \&process_alerthistory,
+);
+    
+#my ($action, $host, $service, $username, $comment);
+my $now=`date +%s`;
+chomp ( $now );
+my $commandfile='/var/log/nagios/rw/nagios.cmd';
+open CF, ">$commandfile" or die $!;
+my $usage = <<EOF;
+usage: $0 action service\@host commnent
+
+where: service  the name of the service we are checking
+       host     Name of the host we are checking
+       commment Comment we want to pass to the action
+
+       check:         Immediately recheck service, host, service\@host (no state update on run)
+       reschedule:    Reschedule service, host, service\@host (state update on run)
+       acknowledge:   Acknowledge current alert for service, host, service\@host
+       unacknowledge: Undo acknowledge for service, host, service\@host
+       inhibit:       Silence all alerts for service, host, service\@host
+       uninhibit:     Undo inhibit for service, host, service\@host
+       checkhistory:  check history of particular check
+       alerthistory:  check history of notificaitons
+       commandhistory:check history of commands executed on particular check
+
+EOF
+if ( !defined ( $ARGV[0] ) ||  !defined ( $ARGV[1] ) ) {
+  print $usage."\n";
+  exit;
+}
+
+$action=$ARGV[0];
+
+if ( $action eq '' || $action eq '-h' ) {
+  print "$usage\n";
+  exit;
+}
+
+if ( $ARGV[1]=~/\@/ ) {
+   ( $service, $host ) = split ( /\@/, $ARGV[1] );
+   if ($host ne '') {
+   $host = fix_hostname($host);
+   }
+}
+else {
+   $host = $ARGV[1];
+   $host = fix_hostname($host);
+}
+
+$username = getlogin(); 
+$comment = $ARGV[2];
+
+
+if ( $HELP &&  ! defined ( $action) ) {
+print "$usage";
+}
+if (defined $HANDLER_FOR{$action}) {
+   $HANDLER_FOR{$action}->();
+}
+else {
+      die " Only possible actions are status check reschedule acknowledge disable_check enable_check disable_notification  and enable_notification\n";
+}
+
+#### The following section is for acknowledging alert.  We are sending standard Nagios Macro to named pipe.#####
+
+sub process_acknowledge { 
+   if ( defined ( $service ) ) {
+      send_to_named_pipe ( "ACKNOWLEDGE_SVC_PROBLEM;$host;$service;1;1;1;$username;$comment" );
+   }
+   else {
+      send_to_named_pipe ( "ACKNOWLEDGE_HOST_PROBLEM;$host;1;1;1;$username;$comment" );
+   }
+}
+
+#### The following section is for unacknowledging alert.  We are sending standard Nagios Macro to named pipe.#####
+
+sub process_unacknowledge { 
+   if ( defined ( $service ) ) {
+      send_to_named_pipe ( "REMOVE_SVC_ACKNOWLEDGEMENT;$host;$service" );
+   }
+   else {
+      send_to_named_pipe ( "REMOVE_HOST_ACKNOWLEDGEMENT;$host" );
+   }
+}
+
+#### The following section is for inhibit alert.  We are sending standard Nagios Macro to named pipe.#####
+
+sub process_inhibit { 
+   if ( defined ( $service ) ) {
+      send_to_named_pipe ( "DISABLE_SVC_NOTIFICATIONS;$host;$service" );
+   }
+   else {
+      send_to_named_pipe ( " DISABLE_HOST_NOTIFICATIONS;$host" );
+   }
+}
+#### The following section is for uninhibit alert.  We are sending standard Nagios Macro to named pipe.#####
+
+sub process_uninhibit { 
+   if ( defined ( $service ) ) {
+      send_to_named_pipe ( "ENABLE_SVC_NOTIFICATIONS;$host;$service" );
+   }
+   else {
+      send_to_named_pipe ( "ENABLE_HOST_NOTIFICATIONS;$host" );
+   }
+}
+#### The following section is for andding comment to host or service page.  We are sending standard Nagios Macro to named pipe.#####
+
+sub process_addcomment { 
+   if ( defined ( $service ) ) {
+      send_to_named_pipe ( "ADD_SVC_COMMENT;$host;$service;1;$username;$comment" );
+   }
+   else {
+      send_to_named_pipe ( "ADD_HOST_COMMENT;$host;1;$username;$comment" );
+   }
+}
+#### The following section is for deleting host or service comment.  We are sending standard Nagios Macro to named pipe.#####
+
+sub process_deletecomment { 
+   if ( defined ( $service ) ) {
+      send_to_named_pipe ( "DEL_SVC_COMMENT;$host;$service;1;$username;$comment" );
+   }
+   else {
+      send_to_named_pipe ( "DEL_HOST_COMMENT;$host;1;$username;$comment" );
+   }
+}
+#### The following section is for rescheduling force immediate host or service check.  We are sending standard Nagios Macro to named pipe.#####
+
+sub process_reschedule {
+   if ( defined ( $service ) ) {
+      send_to_named_pipe ( "SCHEDULE_FORCED_SVC_CHECK;host1;service1;1110741500" );
+   }
+   else {
+      send_to_named_pipe ( "SCHEDULE_FORCED_HOST_CHECK;$host;1110741500\n" );
+   }
+}
+#### This subroutine checks the status of a a particular host or service@host.####
+
+sub process_status {
+   if ( defined ( $service ) ) {
+      my $nagios_log = Nagios::StatusLog->new(
+                Filename => "/var/log/nagios/status.dat",
+                queriedservice => $service,
+                queriedhost => $host,
+                Version  => 3.0
+           );
+      
+      my $log_result = $nagios_log->service("$host", "$service");
+      print "Current status of $service for $host is\n", $log_result->status()."\n";
+      print "--> Since ", localtime ( $log_result->last_check() )."\n";
+      print "--> Last Check ", localtime ( $log_result->last_check() )."\n";
+      print "--> Next Check ", localtime ( $log_result->next_check() )."\n";
+      if ( $log_result->problem_has_been_acknowledged() eq '1' ) {
+         print "--> Problem has been Acknowledgement\n";
+      }
+      else {
+         print "--> Problem has not been Acknowledgement\n";
+      }
+   }
+   else {
+            my $nagios_log = Nagios::StatusLog->new(
+                Filename => "/var/log/nagios/status.dat",
+                queriedservice => '',
+                queriedhost => $host,
+                Version  => 3.0
+           );
+      my $log_host_result = $nagios_log->host ( $host );
+      print "Current status of $host is\n", $log_host_result->status()."\n";
+      print "--> Since ", localtime ( $log_host_result->last_check() )."\n";
+      print "--> Last Check ", localtime ( $log_host_result->last_check() )."\n";
+      print "--> Next Check ", localtime ( $log_host_result->next_check() )."\n";
+      if ( $log_host_result->problem_has_been_acknowledged() eq '1' ) {
+         print "--> Problem has been Acknowledgement\n";
+      }
+      else {
+         print "--> Problem has not been Acknowledgement\n";
+      }
+   }
+}
+ 
+#### The following section is for executing host or service check.  We are sending standard Nagios Macro to named pipe.#####
+
+sub process_check { 
+   #my $command_dir="/usr/lib64/nagios/plugins/";
+   my $nagios_cfg = Nagios::Config->new( Filename=>"/etc/nagios/nagios.cfg" );
+  
+   if ( defined $service ) {
+      my @args;
+      if ( $host eq '' ) {
+         proces_group_service_check($service, $nagios_cfg);
+      }
+      if ( $host ne '' ) {
+          if ( $service eq 'ping' ) {
+            my $actual_ping_command="check_ping -H \$HOSTADDRESS\$ t 45 -4 -w 5000.0,100% -c 5000.0,100% -p 2";
+            my $service_ping_command_before_args= &replace_host_address($actual_ping_command, $host );
+            my $service_ping_command=$service_ping_command_before_args;
+            my $command_ping=$command_dir.$service_ping_command;
+            print "[ping\@$host] ";
+            open ( PS, "$command_ping|" ) or die "Failed: $!\n"; 
+            my @ping_output=<PS>;
+            close PS;
+            print $ping_output[0];
+            exit;
+      }
+
+      my $hostgroups=get_hostgroups( $host, $nagios_cfg );
+      my $service_check_command = check_service ( $service, $hostgroups, $nagios_cfg );
+      my $pre_command;
+ 
+      if ( ref $service_check_command eq "Nagios::Command")  {
+         my $service_check_command_name=$service_check_command->command_name;
+         $pre_command=$service_check_command_name;
+      }
+      else {
+         ($pre_command, @args) = split ( '!', $service_check_command ) ;
+      }
+    
+      my $actual_command = get_service_command ( $pre_command, $nagios_cfg );
+      my $service_command_before_args= &replace_host_address($actual_command, $host );
+      my $service_command=$service_command_before_args;
+      
+      if ( @args ) {
+         $service_command = replace_command_argument( \@args, $service_command );
+      }
+      
+      my $command=$command_dir.$service_command;
+      print "[$service\@$host] ";
+      open ( PS1, "$command|" ) or die "Failed: $!\n";
+      my @Output=<PS1>;
+      close PS1;
+      print $Output[0];
+      }
+   } # end of if defined service
+   if ( defined ( $host ) && ! defined ($service) ) {
+      my $hostgroups=get_hostgroups( $host, $nagios_cfg );
+      foreach my $hostgroup ( @$hostgroups ) {
+      my $service_names_href = get_service ( $hostgroup, $nagios_cfg ) ;
+      
+         for my $service_check_name (keys %{$service_names_href} ) {
+         my $service_check_command = $service_names_href->{$service_check_name};
+            
+            my $pre_command;
+            my @args;
+            ###### Nagios::Object module sometime returns a Nagios::Command object and sometime it returns a string####
+            #### This section is handling this bug of the module#########
+            if ( ref $service_check_command eq "Nagios::Command")  {
+               my $service_check_command_name=$service_check_command->command_name;
+                $pre_command=$service_check_command_name;
+            }
+            else {
+               ( $pre_command, @args ) = split ( '!', $service_check_command ) ;
+            }
+            my $actual_command = get_service_command ( $pre_command, $nagios_cfg );
+            ###### I will print proper warnning here######
+            next if $actual_command eq '';
+            my $service_command = replace_host_address($actual_command, $host );
+            #my $service_command=$service_command_before_args;     
+            if ( @args ) {
+               $service_command = replace_command_argument( \@args, $service_command );
+            }
+            my $command=$command_dir.$service_command;
+            print "[$service_check_name\@$host] ";
+            open ( PS2, "$command|" ) or die "Failed: $!\n";
+            my @Output1=<PS2>;
+            close PS2;
+            print $Output1[0];
+         }
+      }
+      my $host_use = get_use ( $host, $nagios_cfg );
+      if ( $host_use  ne 'externaldns' ) {
+         my $actual_ping_command="check_ping -H \$HOSTADDRESS\$ t 45 -4 -w 5000.0,100% -c 5000.0,100% -p 2";
+         my $service_ping_command_before_args= &replace_host_address($actual_ping_command, $host );
+         my $service_ping_command=$service_ping_command_before_args;
+         my $command_ping=$command_dir.$service_ping_command;
+         print "[ping\@$host] ";
+         open ( PS3, "$command_ping|" ) or die "Failed: $!\n";
+         my @Output2=<PS3>;
+         close PS3;
+         print $Output2[0];
+      }
+   }
+} ## end of process_check subroutine 
+
+#### This sub routine will perform a service check on multipple hosts which have that particular service check atttached to it  #####
+
+sub proces_group_service_check {
+   my ($passed_service, $nagios_cfg) = @_;
+   my $serv_object=$nagios_cfg->find_object( $passed_service, "Nagios::Service");
+   my $hosts= get_all_hosts_for_service($serv_object, $nagios_cfg);
+   my $service_check_command = $serv_object->check_command();
+   my $pre_command,
+   my @args;
+   for my $actual_host ( @{$hosts} ) {
+      if ( ref $service_check_command eq "Nagios::Command")  {
+         my $service_check_command_name=$service_check_command->command_name;
+         $pre_command=$service_check_command_name;
+      }
+      else {
+         ($pre_command, @args) = split ( '!', $service_check_command ) ;
+      } 
+
+      my $actual_command = get_service_command ( $pre_command, $nagios_cfg );
+      my $service_command_before_args= &replace_host_address($actual_command, $actual_host );
+      my $service_command=$service_command_before_args;
+
+      if ( @args ) {
+         $service_command = replace_command_argument( \@args, $service_command );
+      }
+
+      my $command=$command_dir.$service_command;
+      print "[$service\@$actual_host] ";
+      open ( PS4, "$command|" ) or die "Failed: $!\n";
+      my @Output3=<PS4>;
+      close PS4;
+      print $Output3[0];
+   }
+}
+
+
+#### This subroutine is created to gather checkhistory from ndo #####
+#This subroutine is working on indexed key, however it may suffer 
+#performance in the future as the database become larger#############
+
+sub process_checkhistory {
+    my $object_id_query;
+    my $object_id;
+    my $service_query; 
+    
+    my $dbh = DBI->connect("DBI:mysql:$database;host=$dbhostname", $login_username, $password,
+                            { RaiseError => 1 }
+                                            );
+                                            
+    my $sth;
+    my $sth1;
+    if ( defined ( $service ) ) {
+        if ( $host eq '' ) {
+            print "must specify hostname\n";
+            exit;
+        }
+        if ( $service eq 'ping' ) {
+           $object_id_query="Select object_id from nagios_objects where name1='$host' and name2 IS NULL";
+           my $sth=$dbh->prepare($object_id_query);
+           $sth->execute();
+           $sth->bind_columns (\$object_id);
+           while ( $sth->fetch () ) {
+              $service_query="select * from (select start_time, output from nagios_hostchecks where host_object_id =$object_id order by hostcheck_id desc) as tmptbl order by tmptbl.start_time";
+              $sth1=$dbh->prepare($service_query);
+              $sth1->execute();
+              my ($start_time,$output);
+              $sth1->bind_columns (\$start_time, \$output);
+              while ( $sth1->fetchrow_array () ) {
+                  print "ping\@$host:$start_time:$output\n";
+              }
+              $sth1->finish();
+           }
+           $sth->finish();
+       } 
+       else {
+           $object_id_query="Select object_id from nagios_objects where name1='$host' and name2='$service'";
+           my $sth=$dbh->prepare($object_id_query);
+           $sth->execute();
+           $sth->bind_columns (\$object_id);
+           while ( $sth->fetch () ) {
+           $service_query="select * from (select start_time, output from nagios_servicechecks where service_object_id =$object_id order by servicecheck_id desc) as tmptbl order by tmptbl.start_time";
+           $sth1=$dbh->prepare($service_query);
+           $sth1->execute();
+           my ($start_time,$output);
+           $sth1->bind_columns (\$start_time, \$output);
+           while ( $sth1->fetchrow_array () ) {
+           print "$service\@$host:$start_time:$output\n";
+           }
+           $sth1->finish();
+           }
+           $sth->finish();
+       }
+    }
+    else {
+        print "you did not specify a servicename\n";
+        exit;
+    }
+   $dbh->disconnect();
+
+} ### end of process_checkhistory subroutine.
+
+#### The subroutine checks alert history on a particular host.#####
+sub process_alerthistory {
+    my $object_id_query;
+    my $object_id;
+    my $service_query; 
+    
+    my $dbh = DBI->connect("DBI:mysql:$database;host=$dbhostname", $login_username, $password,
+                            { RaiseError => 1 }
+                                            );
+    my $sth;
+    my $sth1;
+    if ( defined ( $service ) ) {
+        if ( $host eq '' ) {
+            print "must specify hostname\n";
+            exit;
+        }
+        if ( $service eq 'ping' ) {
+           $object_id_query="Select object_id from nagios_objects where name1='$host' and name2 IS NULL";
+           my $sth=$dbh->prepare($object_id_query);
+           $sth->execute();
+           $sth->bind_columns (\$object_id);
+           while ( $sth->fetch () ) {
+              $service_query="select * from (select start_time, output from nagios_notifications where object_id=$object_id order by notification_id desc) as tmptbl order by tmptbl.start_time";
+              $sth1=$dbh->prepare($service_query);
+              $sth1->execute();
+              my ($start_time,$output);
+              $sth1->bind_columns (\$start_time, \$output);
+              while ( $sth1->fetchrow_array () ) {
+                  print "ping\@$host:$start_time:$output\n";
+              }
+              $sth1->finish();
+           }
+           $sth->finish();
+       } 
+       else {
+           $object_id_query="Select object_id from nagios_objects where name1='$host' and name2='$service'";
+           my $sth=$dbh->prepare($object_id_query);
+           $sth->execute();
+           $sth->bind_columns (\$object_id);
+           while ( $sth->fetch () ) {
+           $service_query="select * from (select start_time, output from nagios_notifications where object_id=$object_id order by notification_id desc) as tmptbl order by tmptbl.start_time";
+           $sth1=$dbh->prepare($service_query);
+           $sth1->execute();
+           my ($start_time,$output);
+           $sth1->bind_columns (\$start_time, \$output);
+           while ( $sth1->fetchrow_array () ) {
+           print "$service\@$host:$start_time:$output\n";
+           }
+           $sth1->finish();
+           }
+           $sth->finish();
+       }
+    }
+    else {
+        print "you did not specify a servicename\n";
+        exit;
+    }
+   $dbh->disconnect();
+
+} ### end of process_alertstory subroutine.
+
+########## This subroutine is implemented to get command history###########################3
+sub process_commandhistory {
+    my $host_command_query;
+    my $service_command_query; 
+    
+    my $dbh = DBI->connect("DBI:mysql:$database;host=$dbhostname", $login_username, $password,
+                            { RaiseError => 1 }
+                                            );
+    my $sth;
+    if ( defined ( $service ) ) {
+        if ( $host eq '' ) {
+            print "must specify hostname\n";
+            exit;
+        }
+        if ( $service eq 'ping' ) {
+           $host_command_query="Select entry_time, command_name, command_args from nagios_externalcommands where command_name like '%HOST%' and command_args like '$host%'";
+           my $sth=$dbh->prepare($host_command_query);
+           $sth->execute();
+           my ($entry_time, $command_name, $command_args);
+           $sth->bind_columns (\$entry_time, \$command_name, \$command_args);
+           while ( $sth->fetch () ) {
+              print "ping\@$host:$entry_time:$command_name:$command_args\n";
+           }
+           $sth->finish();
+       } 
+       else {
+           $service_command_query="Select entry_time, command_name, command_args from nagios_externalcommands where command_name like '%SVC%' and command_args like '$host%$service%'";
+           my $sth=$dbh->prepare($service_command_query);
+           $sth->execute();
+           my ($entry_time, $command_name, $command_args);
+           $sth->bind_columns (\$entry_time, \$command_name, \$command_args);
+           while ( $sth->fetch () ) {
+              print "$service\@$host:$entry_time:$command_name:$command_args\n";
+           }
+           $sth->finish();
+       }
+    }
+    else {
+        print "you did not specify a servicename\n";
+        exit;
+    }
+   $dbh->disconnect();
+
+} ### end of process_commandhistory subroutine.
+
+#### The subroutine sends commands to named pipe.#####
+
+sub send_to_named_pipe {
+   my ($command )  = @_;
+   chomp ( $command );
+   open CF, ">$commandfile" or die $!;
+
+   if ( defined ( $command ) ) {
+      printf CF "[%i] %s\n", $now, $command;
+      close CF;
+    }
+} 
+
+#### The subroutine gets service description as argument and then convers it to actual command #####
+
+sub get_service_command {
+   my ( $command_name , $nagios_cfg) = @_;
+   my @commands_list = $nagios_cfg->list_commands();
+   my $result;
+  
+   for my $command ( @commands_list ) {
+      if ( $command->command_name() eq $command_name ) {
+         $result = $command->command_line();
+         #$result=~s/^(.*\/+){1}(.*)$/$2/;
+         $result=~s/\$USER1\$\///;
+         return $result;
+      }  
+   }
+}
+
+#### The subroutine replaces $HOST.*$ macro with actual hostname #####
+
+sub replace_host_address {
+   my ( $service_command, $hostname ) = @_;
+   $service_command=~ s/(.*)\$HOSTADDRESS\$(.*)/$1$hostname$2/g;
+   $service_command=~ s/(.*)\$HOSTNAME\$(.*)/$1$hostname$2/g;
+   return $service_command;
+}
+
+sub replace_command_argument {
+   my $i;
+   my $j;
+   my ( $args_ref, $passed_command ) = @_;
+   for($i=0; $i<scalar(@{$args_ref}); $i++) {
+      my $j=$i+1;
+      my $replacement_string="\$ARG".$j."\$";
+      my $string=$args_ref->[$i];
+      chomp $string;
+      if ( ( $string eq '$HOSTADDRESS$' ) || ( $string eq '$HOSTNAME' ) ) {
+        $passed_command =~ s/(.*)\Q$replacement_string\E(.*)/$1 $host $2/g;
+      }
+      else {
+      $passed_command =~ s/(.*)\Q$replacement_string\E(.*)/$1 $string $2/g;
+  }
+   }
+  return $passed_command;
+}
+
+sub replace_secrets {
+   my ( $hash_href, $passed_command ) = @_;
+  # my %local_hash=%$hash_href;
+   my $secret;
+   if ($passed_command=~ /(\$USER\d+\$)/) {
+      $secret=$1;
+   } 
+  chomp $secret;
+  $passed_command =~s/\Q$secret/ $hash_href->{"$secret"} /g;
+  return $passed_command;  
+} 
+#### The subroutine gets a host as its argument and finds all hostgroup attached to that particular host#####
+
+sub get_hostgroups {
+   my ( $host, $nagios_cfg ) = @_;
+   my @return_array;
+   my @host_objects = $nagios_cfg->list_hosts();
+
+   foreach my $hosts (@host_objects){
+      if ($hosts->name() eq $host ) {
+         my $array_ref= $hosts->hostgroups();
+         foreach my $hostgroup ( @{$array_ref} ) {
+            push ( @return_array, ${$hostgroup}{hostgroup_name} );
+         }
+      }
+   } 
+return \@return_array; 
+}
+
+sub get_use {
+   my ( $host, $nagios_cfg ) = @_;
+   my $return_use;
+   my @host_objects = $nagios_cfg->list_hosts();
+   foreach my $hosts (@host_objects){
+      if ($hosts->name() eq $host ) {
+         $return_use=${$hosts}{'use'};
+      }
+   }
+   return $return_use;
+}
+#### This subroutine gets a hostgroup as its argument and finds all services attached to that particular hostgroup#####
+
+sub get_service {
+   my ( $hostgroup, $nagios_cfg ) = @_;
+   chomp $hostgroup;
+   my %check_for;
+   my @services_obj = $nagios_cfg->list_services();
+   foreach my $service ( @services_obj ) {
+      my $service_hostgroups_aref=$service->hostgroup_name();
+      foreach my $serv_hostgroup ( @{$service_hostgroups_aref} ) {
+         if ( $serv_hostgroup->hostgroup_name eq $hostgroup ) {
+            #if (  $service->check_command  ) {
+               $check_for{$service->name} = $service->check_command;
+            #}
+         }
+      }
+   }
+return \%check_for;
+} 
+
+#### This subroutine checks to see if a particular check is attached to a particular host group, if true then it returns the check_command for that service#####
+
+sub check_service {
+   my ($service, $hostgroups, $nagios_cfg) = @_;
+   my $bool_val= 0 ;
+   my @service_objs = $nagios_cfg->list_services();
+   foreach my $service_obj ( @service_objs ) { 
+      if ( $service_obj->name eq $service ) {
+         my $local_hostgroups=$service_obj->{hostgroup_name};
+         foreach my $local_hostgroup ( @{$local_hostgroups} ) {
+            foreach my $hostgroup ( @{$hostgroups} ) {
+               if ( $local_hostgroup->{hostgroup_name} eq $hostgroup ) {
+                  $bool_val = 1;
+                  return $service_obj->check_command;
+               }
+               else {
+                  next;
+               }     
+            }
+         }
+      }
+   } 
+   if ($bool_val ne '1' ) {
+      print "There is no such service for this host.  Good bye\n";
+      exit;
+   }
+}
+
+  
+sub fix_hostname {
+    my ($hostname) = @_;
+    if ($hostname=~m/\w+\.\w+\.\w+/) {
+       $hostname="$hostname";
+    }
+    elsif ($hostname=~m/\w+\.\w+/){
+       $hostname="$hostname.columbia.edu";
+    }
+    else{
+       $hostname="$hostname.cc.columbia.edu";
+    }
+    return $hostname;
+}
+
+sub get_all_hosts_for_service {
+   my ($service_object, $nagios_cfg) = @_;
+   my @return_array;
+   my $derived_hostgroups = $service_object->hostgroup_name();
+   my $host_objects=$nagios_cfg->list_hosts();
+   for my $host_object ( @{$host_objects} ) {
+      my $host_object_hostgroups=$host_object->hostgroups;
+      if (ref $host_object_hostgroups eq "ARRAY") { 
+      for my $derived_hostgroup ( @{$derived_hostgroups} ) {
+         for my $host_hostgroup ( @{$host_object_hostgroups} ) {
+            next if $host_hostgroup->name eq "windows-groups";
+            if ( $host_hostgroup->{hostgroup_name} eq $derived_hostgroup->{hostgroup_name} ) {
+               push @return_array, $host_object->name();
+            }
+         }
+      }
+     }
+   }
+   return \@return_array;
+}
